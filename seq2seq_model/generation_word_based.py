@@ -86,6 +86,37 @@ def get_model(model):
     return encoder_model, decoder_model
 
 
+def get_model_lstm(model):
+    """
+    通过已经加载的模型，获取模型中的encoder和decoder，加入注意力机制
+    :param model: 模型和参数路径
+    :return: encoder_model, decoder_model: 编码模型和解码编码，编码模型用于对上句编码，解码模型用于生成下句
+    """
+    encoder_inputs = model.get_layer(name="encoder_inputs").input
+    encoder_outputs, state_h_enc, state_c_enc = model.get_layer(name="encoder_outputs").output
+    encoder_states = [state_h_enc, state_c_enc]
+    encoder_model = Model(encoder_inputs, encoder_states)
+
+    decoder_inputs = model.get_layer(name="decoder_inputs").input
+    decoder_state_input_h = Input(shape=(LATENT_DIM,), name='input_3')
+    decoder_state_input_c = Input(shape=(LATENT_DIM,), name='input_4')
+    decoder_states_inputs = [decoder_state_input_h, decoder_state_input_c]
+
+    decoder_outputs, state_h_dec, state_c_dec = model.get_layer(name="decoder_LSTM")(decoder_inputs,
+                                                                                     initial_state=decoder_states_inputs)
+
+    attn_out, attn_states = model.get_layer(name="attention_layer").output
+    decoder_concat_input = model.get_layer(name="concat_layer")([decoder_outputs, attn_out])
+
+    decoder_dense = model.get_layer(name="Dense_1")
+    dense_time = model.get_layer(name="time_distributed_layer")(decoder_dense)
+    decoder_outputs = model.get_layer(name="dense_decoder")(dense_time)
+    decoder_model = Model([decoder_inputs] + decoder_states_inputs,
+                          [decoder_outputs] + decoder_concat_input)
+    return encoder_model, decoder_model
+
+
+
 def sample(preds, diversity = 1.0):
     """
     得到最大概率的phrase对应的下标

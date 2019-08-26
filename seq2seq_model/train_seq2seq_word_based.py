@@ -12,11 +12,12 @@
 import numpy as np
 from sklearn.model_selection import train_test_split
 from keras.models import Model
-from keras.layers import LSTM, Dense, Input, Masking
+from keras.layers import LSTM, Dense, Input, Masking, Concatenate, TimeDistributed
 from keras.callbacks import TensorBoard, ModelCheckpoint
 from keras.optimizers import Adam
 import matplotlib.pyplot as plt
 import json
+from AttentionLayer import AttentionLayer
 import os
 
 # 指定GPU和最大占用的显存比例
@@ -221,6 +222,82 @@ def model_lstm(word_to_index_input, word_to_index_target, encoder_input_data_tra
                                )
     model.save('./model_seq2seq_100epoch_final.h5')
     return history_record
+
+def model_lstm_attention(word_to_index_input, word_to_index_target, encoder_input_data_train, decoder_input_data_train, decoder_target_data_train, encoder_input_data_val, decoder_input_data_val, decoder_target_data_val):
+    """
+    训练模型并保存参数设置，加入注意力机制。
+    :param word_to_index_input: 输入内容word2index
+    :param word_to_index_target: 输出内容word2index
+    :param encoder_input_data_train，decoder_input_data_train，decoder_target_data_train:训练数据
+    :param encoder_input_data_val，decoder_input_data_val，decoder_target_data_val:验证数据
+    :return: history_record，这个主要为了后续画图获取loss使用（也可以不画图，直接使用tensorboard）
+    Reference: https://towardsdatascience.com/light-on-math-ml-attention-with-keras-dc8dbc1fad39
+    """
+    encoder_inputs = Input(shape=(None, max(len(word_to_index_input), len(word_to_index_target))), dtype='float32', name="encoder_inputs")
+    encoder_inputs_masking = Masking(mask_value=0)(encoder_inputs)
+    print("build model.....")
+
+    # return_sequences=True表示返回的是序列，否则下面的LSTM无法使用，但是如果下一层不是LSTM，则可以不写
+    # return_sequences=True表示返回所有timestamp的hidden state值；return_state=True是否返回除输出之外的最后一个状态。
+    encoder = LSTM(LATENT_DIM, name="encoder_outputs", return_state=True, return_sequences=True)
+    # encoder_outputs存放的就是全部时间步的 hidden state；state_h存放的是最后一个时间步的 hidden state，state_c存放的是最后一个时间步的 cell state
+    encoder_outputs, state_h, state_c = encoder(encoder_inputs_masking)
+    # We discard `encoder_outputs` and only keep the states.
+    encoder_states = [state_h, state_c]
+
+    decoder_inputs = Input(shape=(None, max(len(word_to_index_input), len(word_to_index_target))), dtype='float32', name="decoder_inputs")
+    decoder_inputs_masking = Masking(mask_value=0)(decoder_inputs)   # 因为输入是一致长度，这个用于处理seq2seq的变长问题
+
+    decoder_LSTM = LSTM(LATENT_DIM, name="decoder_LSTM", return_sequences=True, return_state=True)
+    decoder_outputs, decoder_h, decoder_c = decoder_LSTM(decoder_inputs_masking, initial_state=encoder_states)
+
+    # Attention
+    attn_layer = AttentionLayer(name='attention_layer')
+    attn_out, attn_states = attn_layer([encoder_outputs, decoder_outputs])
+
+    decoder_concat_input = Concatenate(axis=-1, name='concat_layer')([decoder_outputs, attn_out])
+    decoder_dense = Dense(len(word_to_index_target), activation='softmax', name="Dense_1")
+    dense_time = TimeDistributed(decoder_dense, name='time_distributed_layer')
+    decoder_outputs = dense_time(decoder_concat_input, name="dense_decoder")
+
+    model = Model(inputs=[encoder_inputs, decoder_inputs], outputs=decoder_outputs)
+    print(model.summary())
+
+    adam = Adam(lr=0.001, beta_1=0.9, beta_2=0.99, epsilon=1e-08)
+    model.compile(loss='categorical_crossentropy',
+                  optimizer=adam,
+                  metrics=['accuracy'])
+
+    print("Train....")
+    # save tensorboard info
+    tensorboard = TensorBoard(log_dir='./tensorboard_log/')
+    # save best model.
+    checkpoint = ModelCheckpoint(filepath='./model_seq2seq_100epoch_best.h5',
+                                 monitor='val_loss', mode='min', save_best_only=True, save_weights_only=False,
+                                 period=1,
+                                 verbose=1)
+    callback_list = [tensorboard, checkpoint]
+
+    # decoder_input_data_train是(41, 19, 179)，但是最后一个维度需要是max(len(word_to_index_input), len(word_to_index_target)
+    decoder_input_data_train_new = np.pad(decoder_input_data_train, ((0, 0), (0, 0), (0, 1)), 'constant', constant_values=0)
+    print("shape of decoder_input_data_train_new::", decoder_input_data_train_new.shape)
+
+    decoder_input_data_val_new = np.pad(decoder_input_data_val, ((0, 0), (0, 0), (0, 1)), 'constant',
+                                          constant_values=0)
+    print("shape of decoder_input_data_val_new::", decoder_input_data_val_new.shape)
+
+    history_record = model.fit([encoder_input_data_train, decoder_input_data_train_new],
+                               decoder_target_data_train,
+                               batch_size=BATCH_SIZE,
+                               epochs=EPOCHS,
+                               validation_data=(
+                               [encoder_input_data_val, decoder_input_data_val_new], decoder_target_data_val),
+                               # validation_split=0.2
+                               callbacks=callback_list
+                               )
+    model.save('./model_seq2seq_100epoch_final.h5')
+    return history_record
+
 
 def plot_accuray(history_record):
     """
